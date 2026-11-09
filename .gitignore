@@ -1,0 +1,60 @@
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Envs
+.env
+.env.*
+!.env.example
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/settings.json
+.idea/
+*.iml
+
+# Data & Models (tracked via DVC)
+data/raw/
+data/processed/
+data/features/
+ml/*/models/
+ml/*/runs/
+*.pkl
+*.joblib
+*.pt
+*.pth
+*.ckpt
+
+# DVC
+/tmp
+.dvc/cache
+.dvc/tmp
+
+# MLflow
+mlruns/
+mlartifacts/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.log
+
+# Node
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# DuckDB WAL
+*.wal

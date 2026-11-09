@@ -1,0 +1,87 @@
+schema: "2.0"
+
+stages:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Phase 1: Geospatial & Solver
+  # ─────────────────────────────────────────────────────────────────────────────
+  build_network:
+    cmd: python simulator/vadodara_network/build_network.py
+    deps:
+      - simulator/vadodara_network/build_network.py
+      - configs/settings.py
+    outs:
+      - simulator/vadodara_network/vadodara_drive.graphml
+      - simulator/vadodara_network/vadodara_nodes_h3.parquet
+      - simulator/vadodara_network/vadodara_edges.parquet
+      - simulator/vadodara_network/vadodara_bbox.json
+
+  generate_workdays:
+    cmd: python simulator/demand_generator/generate_workday.py --days 90 --seed 42
+    deps:
+      - simulator/demand_generator/generate_workday.py
+      - simulator/vadodara_network/vadodara_drive.graphml
+      - configs/settings.py
+    outs:
+      - data/processed/workdays/
+
+  benchmark_phase1:
+    cmd: python scripts/benchmark_phase1.py --mode vadodara --days 30 --ortools-time 10
+    deps:
+      - scripts/benchmark_phase1.py
+      - solver/baselines/greedy.py
+      - solver/ortools_engine/vrptw_solver.py
+      - solver/pyvrp_benchmark/pyvrp_solver.py
+      - data/processed/workdays/
+    outs:
+      - data/processed/benchmark_results/phase1_benchmark_vadodara.csv
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Phase 2: CQR ETA Model
+  # ─────────────────────────────────────────────────────────────────────────────
+  build_eta_features:
+    cmd: python ml/eta_cqr/build_features.py
+    deps:
+      - ml/eta_cqr/build_features.py
+      - simulator/vadodara_network/vadodara_nodes_h3.parquet
+      - data/processed/workdays/
+    outs:
+      - data/features/eta_features.parquet
+
+  train_cqr_model:
+    cmd: python ml/eta_cqr/train_cqr.py
+    deps:
+      - ml/eta_cqr/train_cqr.py
+      - data/features/eta_features.parquet
+    outs:
+      - ml/eta_cqr/models/
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Phase 3: GATv2 Neural Sequencer
+  # ─────────────────────────────────────────────────────────────────────────────
+  preprocess_amazon:
+    cmd: python ml/gnn_sequencer/preprocess_amazon.py
+    deps:
+      - ml/gnn_sequencer/preprocess_amazon.py
+      - data/raw/amazon_last_mile/
+    outs:
+      - data/processed/amazon_graphs/
+
+  train_gatv2:
+    cmd: python ml/gnn_sequencer/train_gatv2.py
+    deps:
+      - ml/gnn_sequencer/train_gatv2.py
+      - data/processed/amazon_graphs/
+    outs:
+      - ml/gnn_sequencer/models/
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Phase 4: MaskablePPO Dispatcher
+  # ─────────────────────────────────────────────────────────────────────────────
+  train_rl_dispatcher:
+    cmd: python ml/rl_dispatcher/train_ppo.py
+    deps:
+      - ml/rl_dispatcher/train_ppo.py
+      - simulator/disruptions/
+      - ml/eta_cqr/models/
+    outs:
+      - ml/rl_dispatcher/models/

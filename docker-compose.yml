@@ -1,0 +1,139 @@
+version: "3.9"
+
+services:
+  # ─── Routing Engine ──────────────────────────────────────────────────────────
+  osrm:
+    image: osrm/osrm-backend:latest
+    container_name: routemind_osrm
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./data/osrm:/data
+    # Pre-process step: docker-compose run osrm osrm-routed /data/vadodara-latest.osm.pbf
+    command: osrm-routed --algorithm mld /data/vadodara-latest.osrm
+    networks:
+      - routemind_net
+
+  # ─── Databases ───────────────────────────────────────────────────────────────
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: routemind_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: routemind
+      POSTGRES_USER: routemind
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-routemind_dev}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+    networks:
+      - routemind_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: routemind_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - routemind_net
+
+  # ─── MLflow Tracking Server ───────────────────────────────────────────────────
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.13.2
+    container_name: routemind_mlflow
+    restart: unless-stopped
+    ports:
+      - "5001:5000"
+    environment:
+      MLFLOW_BACKEND_STORE_URI: postgresql://routemind:${POSTGRES_PASSWORD:-routemind_dev}@postgres:5432/routemind
+      MLFLOW_DEFAULT_ARTIFACT_ROOT: /mlartifacts
+    volumes:
+      - mlflow_artifacts:/mlartifacts
+    depends_on:
+      - postgres
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri postgresql://routemind:${POSTGRES_PASSWORD:-routemind_dev}@postgres:5432/routemind
+      --default-artifact-root /mlartifacts
+    networks:
+      - routemind_net
+
+  # ─── FastAPI Backend ──────────────────────────────────────────────────────────
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: routemind_api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://routemind:${POSTGRES_PASSWORD:-routemind_dev}@postgres:5432/routemind
+      REDIS_URL: redis://redis:6379/0
+      OSRM_URL: http://osrm:5000
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      - ./backend:/app
+      - ./ml:/ml
+      - ./data:/data
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - routemind_net
+
+  # ─── Celery Worker ────────────────────────────────────────────────────────────
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: routemind_worker
+    restart: unless-stopped
+    command: celery -A worker.celery_app worker --loglevel=info --concurrency=4
+    environment:
+      DATABASE_URL: postgresql+asyncpg://routemind:${POSTGRES_PASSWORD:-routemind_dev}@postgres:5432/routemind
+      REDIS_URL: redis://redis:6379/0
+      OSRM_URL: http://osrm:5000
+    volumes:
+      - ./backend:/app
+      - ./ml:/ml
+      - ./data:/data
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - routemind_net
+
+  # ─── Next.js Frontend ─────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: routemind_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_MAPLIBRE_STYLE: https://demotiles.maplibre.org/style.json
+    depends_on:
+      - api
+    networks:
+      - routemind_net
+
+volumes:
+  postgres_data:
+  redis_data:
+  mlflow_artifacts:
+
+networks:
+  routemind_net:
+    driver: bridge
