@@ -358,10 +358,15 @@ class VRPTWSolver:
                         if sid in self._stop_idx
                     ])
             elif isinstance(target_routes, list):
-                # List of routes, each is a list of node indices (e.g. [0, s1, s2, 0] or [s1, s2])
+                # List of routes, each is a list of node indices or stop_id strings
                 for r in target_routes:
-                    # Strip out depot (0) if present, as ReadAssignmentFromRoutes handles depot implicitly
-                    clean_nodes = [node_idx for node_idx in r if node_idx > 0]
+                    clean_nodes = []
+                    for item in r:
+                        if isinstance(item, str):
+                            if item in self._stop_idx:
+                                clean_nodes.append(self._stop_idx[item])
+                        elif isinstance(item, int) and item > 0:
+                            clean_nodes.append(item)
                     routing_routes.append(clean_nodes)
 
             if any(routing_routes):
