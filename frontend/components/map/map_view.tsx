@@ -1,29 +1,29 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Layers, MapPin, ZoomIn, ZoomOut, AlertTriangle, ShieldCheck } from "lucide-react";
+import { useTheme } from "next-themes";
+import "maplibre-gl/dist/maplibre-gl.css";
 
 interface MapViewProps {
   routesGeojson?: any;
   beforeRoutesGeojson?: any;
   showDiff?: boolean;
   onSelectStop?: (stop: any) => void;
-  disruptionCell?: string;
   selectedStopId?: string;
 }
 
-export function MapView({
+export default function MapView({
   routesGeojson,
   beforeRoutesGeojson,
   showDiff = false,
   onSelectStop,
-  disruptionCell,
   selectedStopId,
 }: MapViewProps) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapInstance = useRef<any>(null);
   const [mapLoaded, setMapLoaded] = useState(false);
   const [useFallbackSvg, setUseFallbackSvg] = useState(false);
+  const { resolvedTheme } = useTheme();
 
   const VADODARA_CENTER = [73.1812, 22.3072]; // [lon, lat]
 
@@ -39,14 +39,26 @@ export function MapView({
       return;
     }
 
+    const isDark = resolvedTheme === "dark";
+    const styleUrl = isDark
+      ? "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
+      : "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json";
+
     try {
+      if (mapInstance.current) {
+        mapInstance.current.setStyle(styleUrl);
+        return;
+      }
+
       const map = new maplibregl.Map({
         container: mapContainer.current,
-        style: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+        style: styleUrl,
         center: VADODARA_CENTER,
-        zoom: 12.5,
+        zoom: 12.3,
         attributionControl: false,
       });
+
+      map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "bottom-right");
 
       map.on("load", () => {
         mapInstance.current = map;
@@ -62,18 +74,19 @@ export function MapView({
         mapInstance.current = null;
       };
     } catch (err) {
-      console.warn("WebGL not supported or MapLibre initialization failed, rendering SVG fallback:", err);
+      console.warn("WebGL not supported or MapLibre initialization failed, using SVG fallback:", err);
       setUseFallbackSvg(true);
     }
-  }, []);
+  }, [resolvedTheme]);
 
   // Update GeoJSON Layers
   useEffect(() => {
-    if (!mapInstance.current || !mapLoaded || !routesGeojson) return;
+    if (!mapInstance.current || !mapLoaded) return;
     const map = mapInstance.current;
+    const isDark = resolvedTheme === "dark";
 
     try {
-      // 1. Before Routes Layer (Dashed Grey Line)
+      // 1. Before Routes Layer (Dashed)
       if (beforeRoutesGeojson && showDiff) {
         if (map.getSource("before-routes")) {
           map.getSource("before-routes").setData(beforeRoutesGeojson);
@@ -88,10 +101,10 @@ export function MapView({
             source: "before-routes",
             filter: ["==", "$type", "LineString"],
             paint: {
-              "line-color": "#64748b",
-              "line-width": 3,
+              "line-color": isDark ? "#71717a" : "#a1a1aa",
+              "line-width": 2.5,
               "line-dasharray": [3, 2],
-              "line-opacity": 0.7,
+              "line-opacity": 0.8,
             },
           });
         }
@@ -100,94 +113,95 @@ export function MapView({
         map.removeSource("before-routes");
       }
 
-      // 2. Active / After Routes Source
-      if (map.getSource("routemind-data")) {
-        map.getSource("routemind-data").setData(routesGeojson);
-      } else {
-        map.addSource("routemind-data", {
-          type: "geojson",
-          data: routesGeojson,
-        });
+      // 2. Active Routes Source
+      if (routesGeojson) {
+        if (map.getSource("routemind-data")) {
+          map.getSource("routemind-data").setData(routesGeojson);
+        } else {
+          map.addSource("routemind-data", {
+            type: "geojson",
+            data: routesGeojson,
+          });
 
-        // Vehicle Route Lines
-        map.addLayer({
-          id: "route-lines",
-          type: "line",
-          source: "routemind-data",
-          filter: ["==", "$type", "LineString"],
-          paint: {
-            "line-color": ["coalesce", ["get", "color"], "#38bdf8"],
-            "line-width": 4,
-            "line-opacity": 0.85,
-          },
-        });
+          // Vehicle Route Lines (Monochrome / High Contrast)
+          map.addLayer({
+            id: "route-lines",
+            type: "line",
+            source: "routemind-data",
+            filter: ["==", "$type", "LineString"],
+            paint: {
+              "line-color": isDark ? "#fafafa" : "#18181b",
+              "line-width": 3,
+              "line-opacity": 0.9,
+            },
+          });
 
-        // Stop Circles
-        map.addLayer({
-          id: "stop-points",
-          type: "circle",
-          source: "routemind-data",
-          filter: ["all", ["==", "$type", "Point"], ["!=", "type", "depot"]],
-          paint: {
-            "circle-radius": [
-              "case",
-              ["boolean", ["get", "is_priority"], false],
-              9,
-              7,
-            ],
-            "circle-color": [
-              "case",
-              ["boolean", ["get", "is_sla_breached"], false],
-              "#ef4444", // Red breached
-              ["boolean", ["get", "is_priority"], false],
-              "#f59e0b", // Amber priority
-              ["coalesce", ["get", "color"], "#38bdf8"],
-            ],
-            "circle-stroke-width": 2,
-            "circle-stroke-color": "#0f172a",
-          },
-        });
+          // Stop Markers
+          map.addLayer({
+            id: "stop-points",
+            type: "circle",
+            source: "routemind-data",
+            filter: ["all", ["==", "$type", "Point"], ["!=", "type", "depot"]],
+            paint: {
+              "circle-radius": [
+                "case",
+                ["boolean", ["get", "is_priority"], false],
+                7.5,
+                6,
+              ],
+              "circle-color": [
+                "case",
+                ["boolean", ["get", "is_sla_breached"], false],
+                "#e11d48", // rose-600
+                ["boolean", ["get", "is_priority"], false],
+                "#f59e0b", // amber-500
+                isDark ? "#22c55e" : "#16a34a", // emerald-600
+              ],
+              "circle-stroke-width": 2,
+              "circle-stroke-color": isDark ? "#09090b" : "#ffffff",
+            },
+          });
 
-        // Depot Point Marker
-        map.addLayer({
-          id: "depot-point",
-          type: "circle",
-          source: "routemind-data",
-          filter: ["==", "type", "depot"],
-          paint: {
-            "circle-radius": 12,
-            "circle-color": "#818cf8",
-            "circle-stroke-width": 3,
-            "circle-stroke-color": "#ffffff",
-          },
-        });
+          // Depot Point Marker
+          map.addLayer({
+            id: "depot-point",
+            type: "circle",
+            source: "routemind-data",
+            filter: ["==", "type", "depot"],
+            paint: {
+              "circle-radius": 10,
+              "circle-color": isDark ? "#ffffff" : "#000000",
+              "circle-stroke-width": 3,
+              "circle-stroke-color": isDark ? "#3f3f46" : "#e4e4e7",
+            },
+          });
 
-        // Click Handler on stops
-        map.on("click", "stop-points", (e: any) => {
-          if (e.features && e.features[0]) {
-            const props = e.features[0].properties;
-            if (onSelectStop) onSelectStop(props);
-          }
-        });
+          // Click Handler on stops
+          map.on("click", "stop-points", (e: any) => {
+            if (e.features && e.features[0]) {
+              const props = e.features[0].properties;
+              if (onSelectStop) onSelectStop(props);
+            }
+          });
 
-        map.on("mouseenter", "stop-points", () => {
-          map.getCanvas().style.cursor = "pointer";
-        });
-        map.on("mouseleave", "stop-points", () => {
-          map.getCanvas().style.cursor = "";
-        });
+          map.on("mouseenter", "stop-points", () => {
+            map.getCanvas().style.cursor = "pointer";
+          });
+          map.on("mouseleave", "stop-points", () => {
+            map.getCanvas().style.cursor = "";
+          });
+        }
       }
     } catch (e) {
       console.warn("Map layer update warning:", e);
     }
-  }, [routesGeojson, beforeRoutesGeojson, showDiff, mapLoaded, onSelectStop]);
+  }, [routesGeojson, beforeRoutesGeojson, showDiff, mapLoaded, onSelectStop, resolvedTheme]);
 
   // Extract stops & lines for SVG fallback rendering
   const features = routesGeojson?.features || [];
   const routeLines = features.filter((f: any) => f.geometry?.type === "LineString");
   const stopPoints = features.filter((f: any) => f.geometry?.type === "Point");
 
-  // Project lat/lon to SVG 800x600 viewBox
   const minLon = 73.12, maxLon = 73.24;
   const minLat = 22.25, maxLat = 22.36;
   const project = (coords: number[]) => {
@@ -196,40 +210,28 @@ export function MapView({
     return [x, y];
   };
 
-  return (
-    <div className="relative w-full h-full min-h-[500px] bg-slate-950 rounded-2xl overflow-hidden border border-slate-800 shadow-2xl flex flex-col">
-      {/* Map Header Overlay */}
-      <div className="absolute top-4 left-4 z-10 flex items-center space-x-2">
-        <div className="bg-slate-900/90 backdrop-blur px-3 py-1.5 rounded-lg border border-slate-700/80 shadow-lg flex items-center space-x-2">
-          <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
-          <span className="text-xs font-semibold text-slate-200">
-            Vadodara Road Network (Live H3 Grid)
-          </span>
-        </div>
-        {showDiff && (
-          <div className="bg-amber-500/10 border border-amber-500/30 px-2.5 py-1 rounded-lg text-amber-300 text-xs font-mono font-medium">
-            Comparing: Baseline (Dashed) vs Re-Route (Solid)
-          </div>
-        )}
-      </div>
+  const isDark = resolvedTheme === "dark";
 
-      {/* MapLibre Canvas Container */}
+  return (
+    <div className="relative h-full w-full overflow-hidden select-none">
       {!useFallbackSvg ? (
-        <div ref={mapContainer} className="w-full h-full flex-1" />
+        <div ref={mapContainer} className="h-full w-full overflow-hidden" />
       ) : (
-        /* High-Fidelity SVG Fallback Canvas */
-        <div className="w-full h-full flex-1 relative bg-slate-950 p-4 flex items-center justify-center">
-          <svg
-            viewBox="0 0 800 600"
-            className="w-full h-full max-h-[700px] filter drop-shadow-md select-none"
-          >
-            {/* Dark Grid Background */}
+        /* Minimalist High-Contrast SVG Fallback */
+        <div className="h-full w-full relative p-4 flex items-center justify-center bg-zinc-50 dark:bg-zinc-950">
+          <svg viewBox="0 0 800 600" className="w-full h-full max-h-[700px] select-none">
+            {/* Subtle Grid */}
             <defs>
-              <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
-                <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" strokeWidth="0.5" />
+              <pattern id="clean-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+                <path
+                  d="M 40 0 L 0 0 0 40"
+                  fill="none"
+                  stroke={isDark ? "#18181b" : "#f4f4f5"}
+                  strokeWidth="1"
+                />
               </pattern>
             </defs>
-            <rect width="800" height="600" fill="url(#grid)" />
+            <rect width="800" height="600" fill="url(#clean-grid)" />
 
             {/* Before Routes (Dashed) */}
             {showDiff &&
@@ -242,15 +244,15 @@ export function MapView({
                       key={`before-${i}`}
                       points={pts}
                       fill="none"
-                      stroke="#64748b"
-                      strokeWidth="2.5"
-                      strokeDasharray="6,4"
-                      opacity="0.6"
+                      stroke={isDark ? "#52525b" : "#a1a1aa"}
+                      strokeWidth="2"
+                      strokeDasharray="5,4"
+                      opacity="0.8"
                     />
                   );
                 })}
 
-            {/* Route Lines */}
+            {/* Active Route Lines */}
             {routeLines.map((f: any, i: number) => {
               const pts = f.geometry.coordinates.map(project).map((p: any) => `${p[0]},${p[1]}`).join(" ");
               return (
@@ -258,11 +260,10 @@ export function MapView({
                   key={`line-${i}`}
                   points={pts}
                   fill="none"
-                  stroke={f.properties?.color || "#38bdf8"}
-                  strokeWidth="3.5"
+                  stroke={isDark ? "#fafafa" : "#18181b"}
+                  strokeWidth="3"
                   strokeLinecap="round"
                   strokeLinejoin="round"
-                  opacity="0.85"
                 />
               );
             })}
@@ -276,17 +277,21 @@ export function MapView({
               if (isDepot) {
                 return (
                   <g key={`depot-${i}`}>
-                    <circle cx={cx} cy={cy} r="14" fill="#818cf8" stroke="#ffffff" strokeWidth="3" />
-                    <text x={cx} y={cy + 4} textAnchor="middle" fill="#ffffff" fontSize="10" fontWeight="bold">
-                      HUB
-                    </text>
+                    <circle
+                      cx={cx}
+                      cy={cy}
+                      r="10"
+                      fill={isDark ? "#ffffff" : "#000000"}
+                      stroke={isDark ? "#3f3f46" : "#e4e4e7"}
+                      strokeWidth="3"
+                    />
                   </g>
                 );
               }
 
               const isBreached = f.properties?.is_sla_breached;
               const isPriority = f.properties?.is_priority;
-              const fill = isBreached ? "#ef4444" : isPriority ? "#f59e0b" : f.properties?.color || "#38bdf8";
+              const fill = isBreached ? "#e11d48" : isPriority ? "#f59e0b" : "#16a34a";
 
               return (
                 <g
@@ -295,60 +300,30 @@ export function MapView({
                   onClick={() => onSelectStop && onSelectStop(f.properties)}
                 >
                   {isSelected && (
-                    <circle cx={cx} cy={cy} r="16" fill="none" stroke="#38bdf8" strokeWidth="2" strokeDasharray="3,3" />
+                    <circle
+                      cx={cx}
+                      cy={cy}
+                      r="14"
+                      fill="none"
+                      stroke={isDark ? "#ffffff" : "#000000"}
+                      strokeWidth="1.5"
+                      strokeDasharray="3,3"
+                    />
                   )}
                   <circle
                     cx={cx}
                     cy={cy}
-                    r={isPriority ? "9" : "7"}
+                    r={isPriority ? "7" : "5.5"}
                     fill={fill}
-                    stroke="#0f172a"
+                    stroke={isDark ? "#09090b" : "#ffffff"}
                     strokeWidth="2"
                   />
-                  <text
-                    x={cx}
-                    y={cy + 3}
-                    textAnchor="middle"
-                    fill="#0f172a"
-                    fontSize="7"
-                    fontWeight="bold"
-                  >
-                    {f.properties?.sequence_idx || ""}
-                  </text>
                 </g>
               );
             })}
           </svg>
         </div>
       )}
-
-      {/* Floating Bottom Legend */}
-      <div className="absolute bottom-4 right-4 z-10 bg-slate-900/90 backdrop-blur px-3.5 py-2.5 rounded-xl border border-slate-700/80 shadow-xl flex items-center space-x-4 text-xs">
-        <div className="flex items-center space-x-1.5">
-          <div className="w-3 h-3 rounded-full bg-indigo-400 border border-white" />
-          <span className="text-slate-300">Hub</span>
-        </div>
-        <div className="flex items-center space-x-1.5">
-          <div className="w-2.5 h-2.5 rounded-full bg-sky-400" />
-          <span className="text-slate-300">V_TW1</span>
-        </div>
-        <div className="flex items-center space-x-1.5">
-          <div className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
-          <span className="text-slate-300">V_TW2</span>
-        </div>
-        <div className="flex items-center space-x-1.5">
-          <div className="w-2.5 h-2.5 rounded-full bg-pink-400" />
-          <span className="text-slate-300">V_VAN</span>
-        </div>
-        <div className="flex items-center space-x-1.5 border-l border-slate-700 pl-3">
-          <div className="w-2.5 h-2.5 rounded-full bg-amber-400" />
-          <span className="text-slate-300">Priority</span>
-        </div>
-        <div className="flex items-center space-x-1.5">
-          <div className="w-2.5 h-2.5 rounded-full bg-red-400" />
-          <span className="text-slate-300">Breached</span>
-        </div>
-      </div>
     </div>
   );
 }
