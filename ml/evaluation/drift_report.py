@@ -76,10 +76,14 @@ def generate_drift_report(
     drift_cols = FEATURE_COLS + [TARGET_TOTAL]
 
     try:
-        from evidently import ColumnMapping
-        from evidently.report import Report
-        from evidently.metric_preset import DataDriftPreset, TargetDriftPreset
-        from evidently.metrics import DatasetDriftMetric
+        try:
+            from evidently.legacy.pipeline.column_mapping import ColumnMapping
+            from evidently.legacy.report import Report
+            from evidently.legacy.metric_preset import DataDriftPreset, TargetDriftPreset
+        except ImportError:
+            from evidently import ColumnMapping
+            from evidently.report import Report
+            from evidently.metric_preset import DataDriftPreset, TargetDriftPreset
 
         column_mapping = ColumnMapping(
             target=TARGET_TOTAL,
@@ -96,6 +100,7 @@ def generate_drift_report(
         cur = current_df[drift_cols].copy()
 
         report.run(reference_data=ref, current_data=cur, column_mapping=column_mapping)
+        output_html.parent.mkdir(parents=True, exist_ok=True)
         report.save_html(str(output_html))
         log.info("Drift report saved → %s", output_html)
 
