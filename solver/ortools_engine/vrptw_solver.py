@@ -1,14 +1,17 @@
 """
-Phase 1 — OR-Tools VRPTW Engine
-================================
+Phase 1/2 — OR-Tools VRPTW Engine (Updated with CQR ETA Integration)
+======================================================================
 Multi-objective Capacitated VRPTW solver using Google OR-Tools with:
 
   - Hard constraints: weight/volume capacity, driver shifts, TW feasibility,
     vehicle-stop compatibility (bike vs. 3-wheeler vs. van)
   - Soft penalties: lateness (w2), overtime (w3), unassigned parcels (w4),
     route-stability Kendall-Tau distance (w5), workload variance (w6)
-  - CQR integration: accepts a quantile parameter α per stop so the solver
-    uses P50 for standard stops and P90 for SLA-critical ones
+  - CQR integration: accepts an optional `eta_predictor` interface.
+    * Standard stops (is_priority=False): uses P50 median transit duration.
+    * SLA-critical stops (is_priority=True): uses calibrated P90 upper bound
+      to hedge against late-delivery penalties (risk-aware routing).
+    * Also accepts a precomputed quantile_duration dict {alpha: matrix}.
   - Warm-start: accepts an initial solution via ReadAssignmentFromRoutes
     (used in Phase 3 with GATv2 neural warm-starts)
   - GLS metaheuristic with configurable time limits
@@ -18,17 +21,27 @@ Mathematical objective (see README for full LaTeX):
       + w3*Σ max(0, T_v - S_v_max)
       + w4*Σ p_i  +  w5*Σ D_edit  +  w6*Var({L_v})
 
+Risk-Aware Transit Callback:
+    For standard stop j:  transit = P50(osrm_j)
+    For priority stop j:  transit = P90_calibrated(osrm_j)  [conservative]
+
 Usage:
     from solver.ortools_engine.vrptw_solver import VRPTWSolver, SolverConfig
+    # Without CQR (Phase 1 mode):
     solver = VRPTWSolver(stops, vehicles, duration_matrix, distance_matrix)
     result = solver.solve(config=SolverConfig(time_limit_s=10))
+
+    # With CQR (Phase 2+ mode):
+    from ml.eta_cqr.model import CQRModel
+    cqr = CQRModel.load(path)
+    solver = VRPTWSolver(stops, vehicles, dur_mat, dist_mat, eta_predictor=cqr)
 """
 from __future__ import annotations
 
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
@@ -36,6 +49,17 @@ from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 from solver.baselines.greedy import Stop, Vehicle, SolverResult
 
 log = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class ETAPredictor(Protocol):
+    """
+    Protocol satisfied by any object that can produce P50/P90 transit predictions.
+    CQRModel implements this interface; a simple OSRM passthrough also qualifies.
+    """
+    def predict_single(self, feature_dict: dict[str, float]) -> dict[str, float]:
+        """Return dict with keys: p50, p90_cal (at minimum)."""
+        ...
 
 # Large constant for infeasible arcs / dropped-visit penalties
 _BIG_M = 10_000_000
@@ -75,8 +99,11 @@ class VRPTWSolver:
         vehicles: list of Vehicle dataclasses
         duration_matrix: (N+1)×(N+1) float32 seconds (row/col 0 = depot)
         distance_matrix: (N+1)×(N+1) float32 metres
-        quantile_duration: optional dict alpha→NxN matrices from CQR model
-                           e.g. {0.50: dur_p50, 0.90: dur_p90}
+        quantile_duration: optional precomputed dict {alpha: NxN matrix}.
+                           Takes precedence over eta_predictor when provided.
+        eta_predictor: optional CQRModel or any ETAPredictor-compatible object.
+                       When provided, predictions are computed per-stop at
+                       setup time and cached into quantile_duration matrices.
     """
 
     def __init__(
@@ -86,16 +113,86 @@ class VRPTWSolver:
         duration_matrix: np.ndarray,
         distance_matrix: np.ndarray,
         quantile_duration: dict[float, np.ndarray] | None = None,
+        eta_predictor: ETAPredictor | None = None,
     ):
         self.stops = stops
         self.vehicles = vehicles
         # Index 0 = depot; indices 1…N = stops
         self.dur_base = duration_matrix
         self.dist_base = distance_matrix
-        self.quant_dur = quantile_duration or {}
         self.n_stops = len(stops)
         self.n_nodes = self.n_stops + 1   # +1 for depot
         self._stop_idx: dict[str, int] = {s.stop_id: i + 1 for i, s in enumerate(stops)}
+
+        # Build quantile matrices — either from precomputed arg or via predictor
+        if quantile_duration is not None:
+            self.quant_dur = quantile_duration
+        elif eta_predictor is not None:
+            self.quant_dur = self._build_quant_matrices_from_predictor(eta_predictor)
+        else:
+            self.quant_dur = {}
+
+    def _build_quant_matrices_from_predictor(
+        self, predictor: ETAPredictor
+    ) -> dict[float, np.ndarray]:
+        """
+        Call the ETA predictor once per stop to build P50 and P90 duration matrices.
+
+        Only the depot→stop and stop→depot arcs are updated (inter-stop arcs
+        still use OSRM baseline for scalability; full matrix update in Phase 3).
+
+        The P50 matrix is used for standard stops; P90_cal for priority stops.
+        """
+        log.info(
+            "Building risk-aware duration matrices via ETAPredictor for %d stops …",
+            self.n_stops,
+        )
+        dur_p50 = self.dur_base.copy().astype(np.float32)
+        dur_p90 = self.dur_base.copy().astype(np.float32)
+
+        for i, s in enumerate(self.stops):
+            node = i + 1  # matrix index (0 = depot)
+            features = {
+                "osrm_baseline_duration_min": float(self.dur_base[0, node]) / 60.0,
+                "osrm_baseline_distance_km": float(self.dist_base[0, node]) / 1000.0,
+                "weight_kg": s.demand_weight,
+                "volume_l": s.demand_volume,
+                "is_priority": float(s.is_priority),
+                # Temporal features will be 0 at planning time (morning dispatch)
+                "sin_hour": 0.342,   # ~08:00 sin(2π*8/24)
+                "cos_hour": 0.940,   # ~08:00 cos(2π*8/24)
+                "sin_dow": 0.0,
+                "cos_dow": 1.0,
+                "peak_hour_flag": 0.0,
+                "hour_of_day": 8.0,
+                "vehicle_type_enc": 1.0,  # default: three_wheeler
+                # H3 zone features (defaults — overridden by real model features)
+                "h3r8_mean_dwell_min": 4.5,
+                "h3r8_std_dwell_min": 1.5,
+                "h3r9_mean_dwell_min": 4.5,
+                "h3r9_std_dwell_min": 1.5,
+            }
+
+            try:
+                preds = predictor.predict_single(features)
+                # Convert minutes → seconds for OR-Tools
+                p50_s = max(10.0, preds["p50"] * 60.0)
+                p90_s = max(10.0, preds["p90_cal"] * 60.0)
+
+                # Update depot↔stop arcs with CQR predictions
+                dur_p50[0, node] = p50_s
+                dur_p50[node, 0] = p50_s
+                dur_p90[0, node] = p90_s
+                dur_p90[node, 0] = p90_s
+            except Exception as e:
+                log.debug("ETAPredictor failed for stop %s: %s — using OSRM fallback.", s.stop_id, e)
+
+        log.info(
+            "P50 mean duration: %.1f min | P90_cal mean duration: %.1f min",
+            dur_p50.mean() / 60.0,
+            dur_p90.mean() / 60.0,
+        )
+        return {0.50: dur_p50, 0.90: dur_p90}
 
     # ── Internal helpers ───────────────────────────────────────────────────────
 
@@ -213,7 +310,10 @@ class VRPTWSolver:
 
         for i, s in enumerate(self.stops):
             node_idx = manager.NodeToIndex(i + 1)
-            time_dim.CumulVar(node_idx).SetRange(s.tw_open_s, s.tw_close_s)
+            # Defensive clamp: OR-Tools crashes if tw_open >= tw_close
+            tw_open = max(0, int(s.tw_open_s))
+            tw_close = max(tw_open + 60, min(int(s.tw_close_s), horizon_s))
+            time_dim.CumulVar(node_idx).SetRange(tw_open, tw_close)
 
         # Vehicle shift windows
         for vi, v in enumerate(self.vehicles):

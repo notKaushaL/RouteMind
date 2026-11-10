@@ -1,3 +1,4 @@
+# ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.so
@@ -5,56 +6,79 @@ __pycache__/
 dist/
 build/
 .eggs/
+*.pyi
 
-# Envs
-.env
-.env.*
-!.env.example
+# ── Virtual environments ──────────────────────────────────────────────────────
 venv/
 .venv/
 env/
+.env
+!.env.example
 
-# IDE
+# ── IDE ───────────────────────────────────────────────────────────────────────
 .vscode/settings.json
 .idea/
 *.iml
 
-# Data & Models (tracked via DVC)
-data/raw/
-data/processed/
-data/features/
-ml/*/models/
-ml/*/runs/
+# ── Data & Models (tracked via DVC, NOT Git) ──────────────────────────────────
+data/raw/*
+data/processed/*
+data/synthetic/*
+data/features/*
+data/osrm/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/synthetic/.gitkeep
+!data/features/.gitkeep
+!data/osrm/.gitkeep
+
+# ── Large geospatial artifacts ────────────────────────────────────────────────
+*.graphml
+*.osm
+*.osm.pbf
+
+# ── Trained models ────────────────────────────────────────────────────────────
 *.pkl
 *.joblib
 *.pt
 *.pth
 *.ckpt
+ml/*/models/
+ml/*/runs/
 
-# DVC
-/tmp
-.dvc/cache
-.dvc/tmp
+# ── Database files ────────────────────────────────────────────────────────────
+*.duckdb
+*.duckdb.wal
+*.db
 
-# MLflow
+# ── DVC ───────────────────────────────────────────────────────────────────────
+.dvc/cache/
+.dvc/tmp/
+/tmp/
+
+# ── MLflow ────────────────────────────────────────────────────────────────────
 mlruns/
 mlartifacts/
 
-# Jupyter
+# ── Reports (generated) ───────────────────────────────────────────────────────
+reports/*.html
+reports/*.json
+!reports/.gitkeep
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
 .ipynb_checkpoints/
 *.ipynb
 
-# OS
+# ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Docker
+# ── Docker ───────────────────────────────────────────────────────────────────
 *.log
 
-# Node
+# ── Node / Frontend ───────────────────────────────────────────────────────────
 frontend/node_modules/
 frontend/.next/
 frontend/out/
-
-# DuckDB WAL
-*.wal
+frontend/.turbo/
