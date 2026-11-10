@@ -114,12 +114,14 @@ class VRPTWSolver:
         distance_matrix: np.ndarray,
         quantile_duration: dict[float, np.ndarray] | None = None,
         eta_predictor: ETAPredictor | None = None,
+        shaped_distance_matrix: np.ndarray | None = None,
     ):
         self.stops = stops
         self.vehicles = vehicles
         # Index 0 = depot; indices 1…N = stops
         self.dur_base = duration_matrix
         self.dist_base = distance_matrix
+        self.shaped_dist = shaped_distance_matrix
         self.n_stops = len(stops)
         self.n_nodes = self.n_stops + 1   # +1 for depot
         self._stop_idx: dict[str, int] = {s.stop_id: i + 1 for i, s in enumerate(stops)}
@@ -211,11 +213,13 @@ class VRPTWSolver:
         dur50 = self.quant_dur.get(0.50, self.dur_base)
         dur90 = self.quant_dur.get(0.90, self.dur_base)
 
+        dist_matrix = self.shaped_dist if self.shaped_dist is not None else self.dist_base
+
         for i in range(self.n_nodes):
             for j in range(self.n_nodes):
                 if i == j:
                     continue
-                dist_m = float(self.dist_base[i, j]) if i > 0 and j > 0 else 0.0
+                dist_m = float(dist_matrix[i, j]) if i > 0 and j > 0 else 0.0
                 # Choose duration based on destination priority
                 if j > 0 and self.stops[j - 1].is_priority:
                     dur_s = float(dur90[i, j])
@@ -232,7 +236,8 @@ class VRPTWSolver:
     def solve(
         self,
         config: SolverConfig | None = None,
-        warm_start_routes: dict[str, list[str]] | None = None,
+        warm_start_routes: dict[str, list[str]] | list[list[int]] | None = None,
+        initial_routes: list[list[int]] | None = None,
     ) -> SolverResult:
         if config is None:
             config = SolverConfig()
@@ -301,7 +306,7 @@ class VRPTWSolver:
         horizon_s = 24 * 3600  # 24-hour planning horizon
         routing.AddDimension(
             time_cb_idx,
-            3600,       # max waiting time (1-hour buffer)
+            horizon_s,  # allow waiting for time windows to open
             horizon_s,
             False,
             "Time",
@@ -310,10 +315,12 @@ class VRPTWSolver:
 
         for i, s in enumerate(self.stops):
             node_idx = manager.NodeToIndex(i + 1)
-            # Defensive clamp: OR-Tools crashes if tw_open >= tw_close
             tw_open = max(0, int(s.tw_open_s))
             tw_close = max(tw_open + 60, min(int(s.tw_close_s), horizon_s))
-            time_dim.CumulVar(node_idx).SetRange(tw_open, tw_close)
+            time_dim.CumulVar(node_idx).SetMin(tw_open)
+            # Soft upper bound aligns directly with w2 lateness objective penalty
+            lateness_penalty = self._scale_int(config.w2_lateness * 10)
+            time_dim.SetCumulVarSoftUpperBound(node_idx, tw_close, lateness_penalty)
 
         # Vehicle shift windows
         for vi, v in enumerate(self.vehicles):
@@ -336,14 +343,40 @@ class VRPTWSolver:
             routing.AddDisjunction([node_idx], penalty)
 
         # ── Warm-start (Phase 3: GATv2 initial solution) ───────────────────────
-        if warm_start_routes:
-            initial_routes = []
-            for v in self.vehicles:
-                route_stops = warm_start_routes.get(v.vehicle_id, [])
-                initial_routes.append([manager.NodeToIndex(self._stop_idx[sid]) for sid in route_stops if sid in self._stop_idx])
-            if any(initial_routes):
-                routing.ReadAssignmentFromRoutes(initial_routes, True)
-                log.info("Warm-start loaded: %d non-empty vehicle routes.", sum(1 for r in initial_routes if r))
+        initial_assignment = None
+        target_routes = initial_routes if initial_routes is not None else warm_start_routes
+
+        if target_routes:
+            routing_routes: list[list[int]] = []
+            if isinstance(target_routes, dict):
+                # Dict of vehicle_id -> list of stop_ids
+                for v in self.vehicles:
+                    route_stops = target_routes.get(v.vehicle_id, [])
+                    routing_routes.append([
+                        self._stop_idx[sid]
+                        for sid in route_stops
+                        if sid in self._stop_idx
+                    ])
+            elif isinstance(target_routes, list):
+                # List of routes, each is a list of node indices (e.g. [0, s1, s2, 0] or [s1, s2])
+                for r in target_routes:
+                    # Strip out depot (0) if present, as ReadAssignmentFromRoutes handles depot implicitly
+                    clean_nodes = [node_idx for node_idx in r if node_idx > 0]
+                    routing_routes.append(clean_nodes)
+
+            if any(routing_routes):
+                try:
+                    initial_assignment = routing.ReadAssignmentFromRoutes(routing_routes, True)
+                    if initial_assignment is not None:
+                        log.info(
+                            "Warm-start loaded successfully: %d vehicle routes.",
+                            sum(1 for r in routing_routes if r)
+                        )
+                    else:
+                        log.warning("ReadAssignmentFromRoutes returned None — falling back to standard search.")
+                except Exception as ex:
+                    log.warning("Could not build assignment from warm-start routes: %s", ex)
+                    initial_assignment = None
 
         # ── Search parameters ──────────────────────────────────────────────────
         search_params = pywrapcp.DefaultRoutingSearchParameters()
@@ -360,11 +393,14 @@ class VRPTWSolver:
         search_params.time_limit.seconds = config.time_limit_s
         search_params.log_search = False
 
-        if warm_start_routes:
+        if initial_assignment is not None:
             search_params.solution_limit = 1_000_000  # keep searching from warm-start
 
         # ── Solve ──────────────────────────────────────────────────────────────
-        solution = routing.SolveWithParameters(search_params)
+        if initial_assignment is not None:
+            solution = routing.SolveFromAssignmentWithParameters(initial_assignment, search_params)
+        else:
+            solution = routing.SolveWithParameters(search_params)
         solve_time = time.perf_counter() - t0
 
         if solution is None:
@@ -418,6 +454,6 @@ class VRPTWSolver:
             extra={
                 "objective_value": solution.ObjectiveValue(),
                 "time_limit_s": config.time_limit_s,
-                "warm_started": warm_start_routes is not None,
+                "warm_started": initial_assignment is not None,
             },
         )
