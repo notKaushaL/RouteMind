@@ -88,6 +88,13 @@ class DisruptionEngine:
         self._fired_events: List[DisruptionEvent] = []
         self._active_traffic_spikes: List[TrafficSpikeEvent] = []
 
+    def add_event(self, event: DisruptionEvent):
+        """Append a new event and activate traffic spikes immediately if within horizon."""
+        self.events.append(event)
+        self.events.sort(key=lambda e: e.timestamp_s)
+        if isinstance(event, TrafficSpikeEvent):
+            self._active_traffic_spikes.append(event)
+
     def get_due_events(self, current_time_s: float) -> List[DisruptionEvent]:
         """Return and activate all events whose timestamp has arrived."""
         due: List[DisruptionEvent] = []
